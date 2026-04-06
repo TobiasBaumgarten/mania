@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::PathBuf;
@@ -23,7 +23,11 @@ enum Command {
     Start,
 
     /// Stop the current session and print elapsed time
-    Stop,
+    Stop {
+        /// Optional end time (format: hh:mm)
+        #[arg(long)]
+        time: Option<NaiveTime>,
+    },
 
     /// Show elapsed time (defaults to current session, or today if none active)
     Status {
@@ -152,7 +156,7 @@ fn cmd_start(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stop(conn: &Connection) -> Result<()> {
+fn cmd_stop(conn: &Connection, time: Option<NaiveTime>) -> Result<()> {
     let row: Option<(i64, i64)> = conn
         .query_row(
             "SELECT id, started_at FROM sessions WHERE stopped_at IS NULL LIMIT 1",
@@ -166,7 +170,18 @@ fn cmd_stop(conn: &Connection) -> Result<()> {
         None => bail!("No active session. Run `tt start` to begin tracking."),
     };
 
-    let ts = now_unix();
+    let ts = match time {
+        Some(p_time) => {
+            let datetime = Local::now().date_naive().and_time(p_time);
+            Local
+                .from_local_datetime(&datetime)
+                .single()
+                .unwrap()
+                .timestamp()
+        }
+        None => now_unix(),
+    };
+
     conn.execute(
         "UPDATE sessions SET stopped_at = ?1 WHERE id = ?2",
         params![ts, id],
@@ -335,7 +350,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Command::Start => cmd_start(&conn),
-        Command::Stop => cmd_stop(&conn),
+        Command::Stop { time } => cmd_stop(&conn, time),
         Command::Status { scope } => cmd_status(&conn, scope),
         Command::History { from, to } => cmd_history(&conn, from, to),
     }
