@@ -20,11 +20,15 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Start a new time tracking session
-    Start,
+    Start {
+        /// Optional start time (format: hh:mm)
+        #[arg(long)]
+        time: Option<NaiveTime>,
+    },
 
     /// Stop the current session and print elapsed time
     Stop {
-        /// Optional end time (format: hh:mm)
+        /// Optional stop time (format: hh:mm)
         #[arg(long)]
         time: Option<NaiveTime>,
     },
@@ -33,6 +37,14 @@ enum Command {
     Status {
         #[arg(value_enum, default_value = "auto")]
         scope: StatusScope,
+    },
+
+    /// Show delta time between two dates (format: YYYY-MM-DD)
+    Delta {
+        /// Start date (inclusive), e.g. 2025-01-01
+        from: NaiveDate,
+        /// End date (inclusive), e.g. 2025-01-31
+        to: NaiveDate,
     },
 
     /// Show history between two dates (format: YYYY-MM-DD)
@@ -124,7 +136,7 @@ fn local_from_unix(ts: i64) -> DateTime<Local> {
 
 // ── Commands ───────────────────────────────────────────────────────────────────
 
-fn cmd_start(conn: &Connection) -> Result<()> {
+fn cmd_start(conn: &Connection, time: Option<NaiveTime>) -> Result<()> {
     let active: Option<i64> = conn
         .query_row(
             "SELECT id FROM sessions WHERE stopped_at IS NULL LIMIT 1",
@@ -141,12 +153,23 @@ fn cmd_start(conn: &Connection) -> Result<()> {
         )?;
         let dt = local_from_unix(started);
         bail!(
-            "A session is already running (started at {}). Run `tt stop` first.",
+            "A session is already running (started at {}). Run `mania stop` first.",
             dt.format("%H:%M:%S")
         );
     }
 
-    let ts = now_unix();
+    let ts = match time {
+        Some(p_time) => {
+            let datetime = Local::now().date_naive().and_time(p_time);
+            Local
+                .from_local_datetime(&datetime)
+                .single()
+                .unwrap()
+                .timestamp()
+        }
+        None => now_unix(),
+    };
+
     conn.execute("INSERT INTO sessions (started_at) VALUES (?1)", params![ts])?;
 
     println!(
@@ -277,7 +300,7 @@ fn cmd_status(conn: &Connection, scope: StatusScope) -> Result<()> {
     Ok(())
 }
 
-fn cmd_history(conn: &Connection, from: NaiveDate, to: NaiveDate) -> Result<()> {
+fn cmd_delta(conn: &Connection, from: NaiveDate, to: NaiveDate) -> Result<()> {
     if from > to {
         bail!("Start date must be before or equal to end date.");
     }
@@ -334,6 +357,59 @@ fn print_range_summary(
     Ok(())
 }
 
+fn cmd_history(conn: &Connection, from: NaiveDate, to: NaiveDate) -> Result<()> {
+    let (start_ts, _) = day_bounds(from);
+    let (_, end_ts) = day_bounds(to);
+
+    let mut stmt = conn.prepare(
+        "SELECT id, started_at, stopped_at
+         FROM sessions
+         WHERE started_at <= ?2
+           AND (stopped_at >= ?1 OR stopped_at IS NULL)
+         ORDER BY started_at ASC",
+    )?;
+
+    let rows = stmt.query_map(params![start_ts, end_ts], |row| {
+        let id: i64 = row.get(0)?;
+        let started_at: i64 = row.get(1)?;
+        let stopped_at: Option<i64> = row.get(2)?;
+        Ok((id, started_at, stopped_at))
+    })?;
+
+    let mut total_secs: i64 = 0;
+    let mut count = 0;
+
+    println!("{:>4}  {:<19}  {:>10}", "ID", "Started", "Duration");
+    println!("{}", "-".repeat(38));
+
+    for row in rows {
+        let (id, started_at, stopped_at) = row?;
+        let end = stopped_at.unwrap_or(now_unix());
+        let duration = end - started_at;
+
+        println!(
+            "{:>4}  {:<19}  {:>10}",
+            id,
+            local_from_unix(started_at).format("%Y-%m-%d %H:%M:%S"),
+            format_duration(duration),
+        );
+
+        total_secs += duration;
+        count += 1;
+    }
+
+    if count == 0 {
+        println!("No sessions found between {} and {}.", from, to);
+        return Ok(());
+    }
+
+    println!("{}", "-".repeat(38));
+    println!("{:>4}  {:<19}  {:>10}", "", "", format_duration(total_secs),);
+    println!("Total: {:.2}h", decimal_hours(total_secs));
+
+    Ok(())
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -349,9 +425,10 @@ fn run() -> Result<()> {
     let conn = open_db(&db_path)?;
 
     match cli.command {
-        Command::Start => cmd_start(&conn),
+        Command::Start { time } => cmd_start(&conn, time),
         Command::Stop { time } => cmd_stop(&conn, time),
         Command::Status { scope } => cmd_status(&conn, scope),
+        Command::Delta { from, to } => cmd_delta(&conn, from, to),
         Command::History { from, to } => cmd_history(&conn, from, to),
     }
 }
