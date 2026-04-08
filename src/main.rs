@@ -37,6 +37,8 @@ enum Command {
     Status {
         #[arg(value_enum, default_value = "auto")]
         scope: StatusScope,
+        /// How many periods to go back (0 = current). E.g. `1` with `week` = last week, with `month` = last month.
+        delta: Option<i64>,
     },
 
     /// Show delta time between two dates (format: YYYY-MM-DD)
@@ -47,12 +49,17 @@ enum Command {
         to: NaiveDate,
     },
 
-    /// Show history between two dates (format: YYYY-MM-DD)
+    /// Show session history between two dates (format: YYYY-MM-DD)
     History {
         /// Start date (inclusive), e.g. 2025-01-01
         from: NaiveDate,
         /// End date (inclusive), e.g. 2025-01-31
         to: NaiveDate,
+    },
+
+    Delete {
+        /// The session id to delete (use history to get the id)
+        id: i64,
     },
 }
 
@@ -225,7 +232,7 @@ fn cmd_stop(conn: &Connection, time: Option<NaiveTime>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_status(conn: &Connection, scope: StatusScope) -> Result<()> {
+fn cmd_status(conn: &Connection, scope: StatusScope, delta: Option<i64>) -> Result<()> {
     let now = Local::now();
     let today = now.date_naive();
 
@@ -280,18 +287,62 @@ fn cmd_status(conn: &Connection, scope: StatusScope) -> Result<()> {
         }
 
         StatusScope::Week => {
-            let weekday_from_mon = today.weekday().num_days_from_monday() as i64;
-            let monday = today - chrono::Duration::days(weekday_from_mon);
+            let (monday, end_day) = match delta {
+                Some(d) => {
+                    let target = today - chrono::Duration::weeks(d as i64);
+                    let offset = target.weekday().num_days_from_monday() as i64;
+                    let mon = target - chrono::Duration::days(offset);
+                    (mon, mon + chrono::Duration::days(6))
+                }
+                None => {
+                    let offset = today.weekday().num_days_from_monday() as i64;
+                    let mon = today - chrono::Duration::days(offset);
+                    (mon, today)
+                }
+            };
+
             let (start_ts, _) = day_bounds(monday);
-            let (_, end_ts) = day_bounds(today);
-            print_range_summary(conn, "This week", start_ts, end_ts, now.timestamp())?;
+            let (_, end_ts) = day_bounds(end_day);
+            let label = if delta.is_some() {
+                format!("Week of {}", monday.format("%Y-%m-%d"))
+            } else {
+                "This week".to_string()
+            };
+            print_range_summary(conn, &label, start_ts, end_ts, now.timestamp())?;
         }
 
         StatusScope::Month => {
-            let first = NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap();
+            let target_month = {
+                let total_months = today.year() * 12 + today.month() as i32 - 1;
+                let offset = delta.unwrap_or(0) as i32;
+                let result = total_months - offset;
+                let year = result / 12;
+                let month = (result % 12 + 1) as u32;
+                (year, month)
+            };
+
+            let first = NaiveDate::from_ymd_opt(target_month.0, target_month.1, 1).unwrap();
+            let last = if delta.is_some() {
+                // last day of that month: go to first of next month, subtract one day
+                let next = if target_month.1 == 12 {
+                    NaiveDate::from_ymd_opt(target_month.0 + 1, 1, 1).unwrap()
+                } else {
+                    NaiveDate::from_ymd_opt(target_month.0, target_month.1 + 1, 1).unwrap()
+                };
+                next - chrono::Duration::days(1)
+            } else {
+                today
+            };
+
+            let label = if delta.is_some() {
+                first.format("%B %Y").to_string()
+            } else {
+                "This month".to_string()
+            };
+
             let (start_ts, _) = day_bounds(first);
-            let (_, end_ts) = day_bounds(today);
-            print_range_summary(conn, "This month", start_ts, end_ts, now.timestamp())?;
+            let (_, end_ts) = day_bounds(last);
+            print_range_summary(conn, &label, start_ts, end_ts, now.timestamp())?;
         }
 
         StatusScope::Auto => unreachable!(),
@@ -410,6 +461,18 @@ fn cmd_history(conn: &Connection, from: NaiveDate, to: NaiveDate) -> Result<()> 
     Ok(())
 }
 
+fn cmd_delete(conn: &Connection, id: i64) -> Result<()> {
+    let affected = conn.execute("DELETE FROM sessions WHERE id = ?", [id])?;
+
+    if affected == 0 {
+        bail!("No session found with ID {}", id);
+    } else {
+        println!("Deleted session {}", id);
+    }
+
+    Ok(())
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -427,8 +490,9 @@ fn run() -> Result<()> {
     match cli.command {
         Command::Start { time } => cmd_start(&conn, time),
         Command::Stop { time } => cmd_stop(&conn, time),
-        Command::Status { scope } => cmd_status(&conn, scope),
+        Command::Status { scope, delta } => cmd_status(&conn, scope, delta),
         Command::Delta { from, to } => cmd_delta(&conn, from, to),
         Command::History { from, to } => cmd_history(&conn, from, to),
+        Command::Delete { id } => cmd_delete(&conn, id),
     }
 }
