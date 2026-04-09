@@ -7,7 +7,7 @@ use std::path::PathBuf;
 // ── CLI Definition ─────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "tt", about = "A simple time tracker", version)]
+#[command(name = "mania", about = "A simple time tracker", version("1.0"))]
 struct Cli {
     /// Path to the SQLite database file (default: ~/.timetrack.db)
     #[arg(long, global = true)]
@@ -57,6 +57,7 @@ enum Command {
         to: NaiveDate,
     },
 
+    /// Delete a session by its id
     Delete {
         /// The session id to delete (use history to get the id)
         id: i64,
