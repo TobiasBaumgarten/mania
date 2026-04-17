@@ -395,11 +395,22 @@ fn print_range_summary(
 
     let total = completed_secs + running_secs;
 
+    let active_days: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT DATE(started_at, 'unixepoch', 'localtime'))
+         FROM sessions
+         WHERE started_at <= ?2
+           AND (stopped_at >= ?1 OR stopped_at IS NULL)",
+        params![start_ts, end_ts],
+        |row| row.get(0),
+    )?;
+
     println!(
-        "{}  —  {:.2}h  ({})",
+        "{}  —  {:.2}h  ({}) over {} day{}",
         label,
         decimal_hours(total),
-        format_duration(total)
+        format_duration(total),
+        active_days,
+        if active_days == 1 { "" } else { "s" },
     );
 
     if running_secs > 0 {
