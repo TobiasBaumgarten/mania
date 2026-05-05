@@ -2,7 +2,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone};
 use clap::{Parser, Subcommand, ValueEnum};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::{fs, path::PathBuf};
 
 // ── CLI Definition ─────────────────────────────────────────────────────────────
 
@@ -93,6 +94,28 @@ fn open_db(path: &PathBuf) -> Result<Connection> {
     )?;
 
     Ok(conn)
+}
+
+fn get_db_path(db: Option<PathBuf>) -> PathBuf {
+    if let Some(re_db) = db {
+        return re_db;
+    }
+    if let Some(user_dir) = directories::UserDirs::new() {
+        let config_path = user_dir.home_dir().join(".mania.toml");
+        if let Ok(content) = fs::read_to_string(&config_path) {
+            let config =
+                toml::from_str::<Config>(&content).expect("The config file is not correct");
+            return config.db_path;
+        } else {
+            let config = Config {
+                db_path: user_dir.home_dir().join(".mania.db"),
+            };
+            let config_toml = toml::to_string(&config).unwrap();
+            fs::write(&config_path, config_toml).unwrap();
+            return config.db_path;
+        }
+    }
+    default_db_path()
 }
 
 fn default_db_path() -> PathBuf {
@@ -485,6 +508,11 @@ fn cmd_delete(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct Config {
+    db_path: PathBuf,
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -496,7 +524,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let db_path = cli.db.unwrap_or_else(default_db_path);
+    let db_path = get_db_path(cli.db);
     let conn = open_db(&db_path)?;
 
     match cli.command {
